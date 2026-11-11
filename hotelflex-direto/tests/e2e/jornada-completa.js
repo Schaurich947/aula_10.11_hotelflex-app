@@ -1,0 +1,162 @@
+// tests/e2e/jornada-completa.js
+// Teste de navegador da jornada: reservar, pagar via Pix, recusa e reenvio, aprovação,
+// hora extra cobrada, adiamento, cancelamento com devolução, painel do hotel e perfil.
+// Pré-requisitos: banco recém-criado (php bin/setup-database.php) e o app rodando.
+// Uso: BASE_URL=http://localhost/PROTO_IA_03.11/hotelflex-direto node tests/e2e/jornada-completa.js
+const fs = require('fs')
+const os = require('os')
+const path = require('path')
+const { chromium } = require('playwright')
+
+const BASE = process.env.BASE_URL || 'http://localhost/hotelflex-direto'
+const OUT = fs.mkdtempSync(path.join(os.tmpdir(), 'hotelflex-e2e-'))
+const PDF = path.join(OUT, 'comprovante.pdf')
+const FAKE = path.join(OUT, 'falso.pdf')
+fs.writeFileSync(PDF, '%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Kids [] /Count 0 >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n')
+fs.writeFileSync(FAKE, '<?php echo "não é um PDF"; ?>')
+const errors = []
+const log = (...a) => console.log(...a)
+const flash = async (p) => (await p.locator('.alert').allInnerTexts()).join(' | ') || '(sem flash)'
+// Dates in the app's time zone (America/Sao_Paulo), not UTC, so "tomorrow" matches the server near midnight.
+const TIME_ZONE = process.env.APP_TIMEZONE || 'America/Sao_Paulo'
+const inDays = (n) => {
+  const [year, month, day] = new Date().toLocaleDateString('en-CA', { timeZone: TIME_ZONE }).split('-').map(Number)
+  return new Date(Date.UTC(year, month - 1, day + n)).toISOString().slice(0, 10)
+}
+
+async function login(browser, email, viewport = { width: 1280, height: 900 }) {
+  const page = await (await browser.newContext({ viewport })).newPage()
+  page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()) })
+  page.on('pageerror', (e) => errors.push(e.message))
+  page.on('dialog', (d) => d.accept())
+  await page.goto(BASE + '/login')
+  await page.fill('#login-email', email); await page.fill('#login-password', 'Demo@1234')
+  await page.getByRole('button', { name: 'Entrar' }).click(); await page.waitForLoadState('networkidle')
+  return page
+}
+const charges = async (p) => (await p.locator('li:has(> div > span.badge)').allInnerTexts()).map((t) => t.replace(/\s+/g, ' ').slice(0, 90))
+
+;(async () => {
+  const browser = await chromium.launch()
+  const ana = await login(browser, 'ana@hotelflex.test')
+  await ana.goto(`${BASE}/hospede/nova-reserva?entrada=${inDays(6)}&saida=${inDays(5)}`)
+  log('0 datas invertidas:', await flash(ana))
+  await ana.goto(`${BASE}/hospede/nova-reserva`)
+  await ana.fill('#search-check-in', inDays(6)); await ana.locator('#search-check-in').dispatchEvent('change')
+  await ana.fill('#search-check-out', inDays(8)); await ana.locator('#search-check-out').dispatchEvent('change')
+  log('0 diárias calculadas:', await ana.locator('[data-nights-output]').innerText())
+  await ana.selectOption('#search-sort', 'maior-preco'); await ana.getByRole('button', { name: 'Buscar quartos' }).click(); await ana.waitForLoadState('networkidle')
+  const prices = async () => (await ana.locator('article .tabular-nums').allInnerTexts()).join(' > ')
+  log('0 maior preço:', await prices())
+  await ana.selectOption('#search-city', 'São Paulo'); await ana.selectOption('#search-sort', 'menor-preco'); await ana.fill('#search-max-price', '400')
+  await ana.getByRole('button', { name: 'Buscar quartos' }).click(); await ana.waitForLoadState('networkidle')
+  log('0 SP até R$400, menor preço:', await prices(), '|', (await ana.locator('article h3').allInnerTexts()).join(', '))
+  await ana.locator('article').first().getByRole('link', { name: 'Ver e reservar' }).click(); await ana.waitForLoadState('networkidle')
+  log('0 revisão:', (await ana.locator('h1').innerText()), '|', (await ana.locator('dl').first().innerText()).replace(/\s+/g, ' ').slice(0, 120))
+  await ana.screenshot({ path: OUT + '/00-revisao.png', fullPage: true })
+  await ana.getByRole('button', { name: 'Confirmar reserva' }).click()
+  log('0 sem aceitar política (validação do navegador) ->', ana.url().includes('revisar') ? 'bloqueado' : 'passou')
+  await ana.check('input[name=accept_policy]')
+  await ana.getByRole('button', { name: 'Confirmar reserva' }).click(); await ana.waitForLoadState('networkidle')
+  const reservationUrl = ana.url(); log('1 reservar ->', reservationUrl.replace(BASE, ''), await flash(ana))
+  log('1 status:', await ana.locator('main header .badge').first().innerText(), '| pix:', await ana.locator('.font-mono').first().innerText())
+  log('1 pedidos de horário antes de pagar:', await ana.locator('#guest-late_checkout').count(), '|', (await ana.getByText('disponível depois que o pagamento').innerText()).slice(0, 60))
+  await ana.screenshot({ path: OUT + '/01-aguardando-pagamento.png', fullPage: true })
+  await ana.setInputFiles('input[name=receipt]', FAKE); await ana.getByRole('button', { name: 'Enviar comprovante' }).click(); await ana.waitForLoadState('networkidle')
+  log('2 arquivo falso:', await flash(ana))
+  await ana.setInputFiles('input[name=receipt]', PDF); await ana.getByRole('button', { name: 'Enviar comprovante' }).click(); await ana.waitForLoadState('networkidle')
+  log('2 comprovante:', await flash(ana), '| etapa:', await ana.locator('[aria-current=step]').innerText())
+
+  const staff = await login(browser, 'recepcao.centro@hotelflex.test')
+  await staff.goto(BASE + '/hotel/pagamentos'); log('3 a conferir:', await staff.locator('article h2').allInnerTexts())
+  await staff.screenshot({ path: OUT + '/02-pagamentos-hotel.png', fullPage: true })
+  const anaCard = () => staff.locator('article:has-text("Ana Souza")')
+  await anaCard().locator('input[name=reason]').fill('Valor diferente do total da reserva'); await anaCard().getByRole('button', { name: 'Recusar' }).click(); await staff.waitForLoadState('networkidle')
+  log('3 recusar:', await flash(staff))
+  await ana.goto(reservationUrl); log('3 ana vê:', await flash(ana))
+  await ana.setInputFiles('input[name=receipt]', PDF); await ana.getByRole('button', { name: 'Enviar comprovante' }).click(); await ana.waitForLoadState('networkidle')
+  await staff.goto(BASE + '/hotel/pagamentos'); await anaCard().getByRole('button', { name: 'Aprovar pagamento' }).click(); await staff.waitForLoadState('networkidle')
+  log('4 aprovar:', await flash(staff))
+  await ana.goto(reservationUrl); log('4 status ana:', await ana.locator('main header .badge').first().innerText())
+
+  await ana.locator('#guest-late_checkout').fill('1'); await ana.locator('form:has(#guest-late_checkout)').getByRole('button', { name: 'Pedir ao hotel' }).click(); await ana.waitForLoadState('networkidle')
+  await ana.getByRole('button', { name: 'Cancelar pedido' }).click(); await ana.waitForLoadState('networkidle')
+  log('5 cancelar pedido:', await flash(ana))
+  await ana.locator('#guest-late_checkout').fill('3'); await ana.locator('form:has(#guest-late_checkout)').getByRole('button', { name: 'Pedir ao hotel' }).click(); await ana.waitForLoadState('networkidle')
+  await staff.goto(BASE + '/hotel/solicitacoes'); await staff.locator('article:has-text("Ana Souza"):has-text("Saída tardia")').getByRole('button', { name: 'Aprovar' }).click(); await staff.waitForLoadState('networkidle')
+  log('5 aprovar saída tardia:', await flash(staff))
+  await ana.goto(reservationUrl); log('5 cobranças:', await charges(ana))
+  await ana.fill('#change-check-in', inDays(7)); await ana.fill('#change-check-out', inDays(10)); await ana.getByRole('button', { name: 'Salvar novas datas' }).click(); await ana.waitForLoadState('networkidle')
+  log('6 adiar:', await flash(ana)); log('6 cobranças:', await charges(ana))
+  await ana.screenshot({ path: OUT + '/03-reserva-cobrancas.png', fullPage: true })
+  log('6 whatsapp hotel:', await ana.locator('a.btn-whatsapp').getAttribute('href'))
+  await ana.getByRole('button', { name: 'Cancelar reserva' }).click(); await ana.waitForLoadState('networkidle')
+  log('7 cancelar:', await flash(ana), '| cobranças:', await charges(ana))
+
+  await staff.goto(BASE + '/hotel/liberacao')
+  log('8 elisa:', (await staff.locator('article:has-text("Elisa Prado")').innerText()).includes('Aguardando pagamento'), '| check-in elisa?', await staff.locator('article:has-text("Elisa Prado")').getByRole('button', { name: 'Registrar check-in' }).count())
+  await staff.locator('article:has(h2:text("Quarto 101"))').getByRole('button', { name: 'Liberar para o Hóspede' }).click(); await staff.waitForLoadState('networkidle')
+  log('8 liberar 101:', await flash(staff))
+  await staff.screenshot({ path: OUT + '/04-painel.png', fullPage: true })
+
+  const bruno = await login(browser, 'bruno@hotelflex.test')
+  await bruno.goto(`${BASE}/hospede/nova-reserva?entrada=${inDays(12)}&saida=${inDays(14)}&cidade=Florian%C3%B3polis`)
+  await bruno.locator('article').first().getByRole('link', { name: 'Ver e reservar' }).click(); await bruno.waitForLoadState('networkidle')
+  await bruno.check('input[value=sinal-balcao]'); await bruno.check('input[name=accept_policy]')
+  await bruno.getByRole('button', { name: 'Confirmar reserva' }).click(); await bruno.waitForLoadState('networkidle')
+  const brunoUrl = bruno.url()
+  log('8b sinal + balcão:', (await bruno.locator('li:has(> div > span.badge) p.font-medium').allInnerTexts()).join(' + '), '| uploads:', await bruno.locator('input[name=receipt]').count())
+  const marina = await login(browser, 'recepcao.marazul@hotelflex.test')
+  await marina.goto(BASE + '/hotel/pagamentos')
+  const openCard = (text) => marina.locator(`article:has-text("Bruno Lima"):has-text("${text}")`).first()
+  await openCard('Sinal').locator('select[name=method]').selectOption('pix_desk'); await openCard('Sinal').getByRole('button', { name: 'Registrar recebimento' }).click(); await marina.waitForLoadState('networkidle')
+  log('8c sinal no balcão:', await flash(marina))
+  await openCard('pagar no hotel').locator('select[name=method]').selectOption('cash'); await openCard('pagar no hotel').getByRole('button', { name: 'Registrar recebimento' }).click(); await marina.waitForLoadState('networkidle')
+  log('8c restante em dinheiro:', await flash(marina))
+  await marina.screenshot({ path: OUT + '/06-pagamentos-balcao.png', fullPage: true })
+  await bruno.goto(brunoUrl)
+  log('8d bruno vê:', await bruno.locator('main header .badge').first().innerText(), '|', (await bruno.locator('li > div > span.badge').allInnerTexts()).join(' / '))
+
+  const diego = await login(browser, 'diego@hotelflex.test')
+  await diego.goto(`${BASE}/cafe?hotel=1&data=${inDays(1)}&pessoas=2`)
+  log('11 café oferta:', (await diego.locator('form:has(input[name=payment_option]) .badge').allInnerTexts()).join(' | '), '|', (await diego.locator('label:has(input[name=payment_option]) strong').allInnerTexts()).join(' vs '))
+  await diego.getByRole('button', { name: 'Reservar café da manhã' }).click(); await diego.waitForLoadState('networkidle')
+  const cafeUrl = diego.url(); log('11 café reservado:', await flash(diego), '|', await diego.locator('main header .badge').first().innerText())
+  await diego.setInputFiles('input[name=receipt]', PDF); await diego.getByRole('button', { name: 'Enviar comprovante' }).click(); await diego.waitForLoadState('networkidle')
+  log('11 comprovante café:', await flash(diego))
+  await staff.goto(`${BASE}/hotel/cafe?data=${inDays(1)}`)
+  log('12 cafés do dia:', (await staff.locator('article h2').allInnerTexts()).join(' / '), '|', (await staff.locator('section[aria-label="Lugares do dia"]').innerText()).replace(/\s+/g, ' '))
+  await staff.locator('article:has-text("Diego Rocha")').getByRole('button', { name: 'Aprovar pagamento' }).click(); await staff.waitForLoadState('networkidle')
+  log('12 aprovar café:', await flash(staff))
+  const elisaCafe = () => staff.locator('article:has-text("Elisa Prado")')
+  await elisaCafe().locator('select[name=method]').selectOption('cash'); await elisaCafe().getByRole('button', { name: 'Registrar recebimento' }).click(); await staff.waitForLoadState('networkidle')
+  await elisaCafe().getByRole('button', { name: 'Marcar como atendido' }).click(); await staff.waitForLoadState('networkidle')
+  log('12 elisa balcão + atendido:', await elisaCafe().locator('.badge').innerText(), '|', await elisaCafe().locator('.card-description').innerText())
+  await staff.screenshot({ path: OUT + '/07-cafe-hotel.png', fullPage: true })
+  await diego.goto(cafeUrl); log('13 diego vê:', await diego.locator('main header .badge').first().innerText())
+  await diego.goto(`${BASE}/cafe`)
+  log('13 aviso venda na hora:', (await diego.locator('aside[aria-label="Venda no local"]').innerText()).replace(/\s+/g, ' ').slice(0, 170))
+  await staff.goto(`${BASE}/hotel/cafe`)
+  log('15 lugares hoje:', (await staff.locator('section[aria-label="Lugares do dia"]').innerText()).replace(/\s+/g, ' '))
+  if (await staff.locator('#walk-in-name').count() === 0) {
+    log('15 venda na hora (fora do horário do café):', await staff.getByText('Venda na hora:').innerText())
+  } else {
+    await staff.fill('#walk-in-name', 'Visitante'); await staff.fill('#walk-in-people', '2'); await staff.selectOption('#walk-in-method', 'cash')
+    await staff.getByRole('button', { name: 'Registrar venda' }).click(); await staff.waitForLoadState('networkidle')
+    log('15 venda na hora:', await flash(staff), '|', await staff.locator('article:has-text("Visitante") .card-description').innerText())
+  }
+  for (const people of [10, 10, 1]) {
+    await diego.goto(`${BASE}/cafe?hotel=2&data=${inDays(3)}&pessoas=${people}`)
+    if (await diego.getByRole('button', { name: 'Reservar café da manhã' }).count() === 0) { log('14 lotação:', await flash(diego)); break }
+    await diego.getByRole('button', { name: 'Reservar café da manhã' }).click(); await diego.waitForLoadState('networkidle')
+  }
+
+  await ana.goto(BASE + '/perfil'); await ana.fill('#whatsapp-phone', '(49) 99127-7070'); await ana.getByRole('button', { name: 'Salvar preferências' }).click(); await ana.waitForLoadState('networkidle')
+  log('9 perfil:', await flash(ana))
+  const mobile = await login(browser, 'admin@hotelflex.test', { width: 390, height: 844 })
+  log('10 admin menu:', (await mobile.locator('nav[aria-label="Navegação principal"]').innerText()).replace(/\s+/g, ' '), '| scrollWidth', await mobile.evaluate(() => document.documentElement.scrollWidth))
+  await mobile.screenshot({ path: OUT + '/05-admin-celular.png' })
+  log('erros de console:', errors.filter((e) => !e.includes('404')))
+  log('capturas de tela em', OUT)
+  await browser.close()
+})().catch((e) => { console.error(e); process.exit(1) })
