@@ -21,10 +21,14 @@ use HotelFlex\Service\BreakfastService;
     <div class="card-content">
         <?= $view->partial('csrf-field') ?>
         <input type="hidden" name="hotel_id" value="<?= e($hotel->id) ?>">
-        <div class="grid gap-3 sm:grid-cols-3">
+        <div class="grid gap-3 sm:grid-cols-4">
             <div class="space-y-2">
                 <label class="label" for="walk-in-name">Nome (opcional)</label>
                 <input class="input" id="walk-in-name" name="customer_name" maxlength="120">
+            </div>
+            <div class="space-y-2">
+                <label class="label" for="walk-in-document">CPF ou CNPJ (nota fiscal)</label>
+                <input class="input" id="walk-in-document" name="customer_document" maxlength="18" placeholder="000.000.000-00" required>
             </div>
             <div class="space-y-2">
                 <label class="label" for="walk-in-people">Pessoas</label>

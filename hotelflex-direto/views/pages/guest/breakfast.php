@@ -13,6 +13,8 @@ use HotelFlex\Service\BreakfastService;
  * @var list<HotelFlex\Domain\BreakfastBooking> $myBookings
  * @var array<int, HotelFlex\Domain\Hotel> $hotelsById
  * @var string $minDate
+ * @var list<HotelFlex\Fiscal\Domain\BillingProfile> $billingProfiles
+ * @var string $billingReturnPath
  */
 ?>
 <?= $view->partial('page-header', [
@@ -50,7 +52,10 @@ use HotelFlex\Service\BreakfastService;
 <?= $view->partial('breakfast-walk-in-notice', ['hotels' => $selectedHotel !== null ? [$selectedHotel] : $hotels]) ?>
 
 <?php if ($selectedHotel !== null && $selectedDate !== null && $seatsLeft !== null): ?>
-    <?= $view->partial('breakfast-offer', ['hotel' => $selectedHotel, 'date' => $selectedDate, 'people' => $people, 'seatsLeft' => $seatsLeft]) ?>
+    <?= $view->partial('breakfast-offer', [
+        'hotel' => $selectedHotel, 'date' => $selectedDate, 'people' => $people, 'seatsLeft' => $seatsLeft,
+        'billingProfiles' => $billingProfiles, 'billingReturnPath' => $billingReturnPath,
+    ]) ?>
 <?php endif; ?>
 
 <section class="space-y-3">

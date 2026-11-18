@@ -10,6 +10,8 @@ use HotelFlex\Domain\BreakfastPaymentOption;
  * @var DateTimeImmutable $date
  * @var int $people
  * @var int $seatsLeft
+ * @var list<HotelFlex\Fiscal\Domain\BillingProfile> $billingProfiles
+ * @var string $billingReturnPath
  */
 $isAvailable = $seatsLeft >= $people;
 ?>
@@ -43,6 +45,7 @@ $isAvailable = $seatsLeft >= $people;
                     </span>
                 </label>
             <?php endforeach; ?>
+            <?= $view->partial('billing-choice', ['billingProfiles' => $billingProfiles, 'billingReturnPath' => $billingReturnPath]) ?>
         <?php endif; ?>
     </div>
     <?php if ($isAvailable): ?>

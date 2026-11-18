@@ -72,24 +72,32 @@ Por padrão, e-mail e WhatsApp ficam em **modo teste**: as mensagens são salvas
 ## Testes
 
 ```bash
-composer install
+composer test               # unitários (regras puras)
+composer test:integration   # integração, segurança e concorrência (banco de teste próprio)
+composer test:volume        # volume: milhares de registros e tempos
 ```
 
-```bash
-composer test
-```
+Os testes não mexem no banco do sistema: usam `<DB_NAME>_test`, recriado a cada teste. Detalhes e objetivo de cada grupo em [`tests/README.md`](tests/README.md).
 
-São 55 testes unitários: preço, disponibilidade, cobranças, sinal, período de datas, filtros, cancelamento, WhatsApp e mensagens.
+## Notas fiscais (fase 1: emissão simulada)
 
-O teste de navegador cobre a jornada completa. Rode com o banco recém-criado:
+> **Simulação.** Nenhuma nota é enviada à prefeitura ou à SEFAZ. Toda nota e todo XML saem marcados "SIMULAÇÃO · Documento de teste · sem valor fiscal". Alíquotas e regras devem ser confirmadas com o contador de cada hotel.
 
-```bash
-npm install --no-save playwright && npx playwright install chromium
-```
+| Venda | Nota | Tributo | Quando entra na fila |
+|---|---|---|---|
+| Hospedagem (diárias, horas extras, diferenças) | NFS-e (serviço, LC 116 item 09.01) | ISS | No **check-out**, com o valor final (pago − créditos) |
+| Café avulso e venda na hora | NFC-e (consumidor) | ICMS | Quando o café é **servido** |
 
-```bash
-set BASE_URL=http://localhost/hotelflex-direto&& node tests/e2e/jornada-completa.js
-```
+- **Antes de pagar**, o cliente escolhe em nome de quem sai a nota: ele mesmo (CPF), outra pessoa (CPF), uma empresa (CNPJ) ou estrangeiro (passaporte e país). **Sem CPF, CNPJ ou documento estrangeiro não há reserva nem café**: o hotel é obrigado a emitir a nota. Na venda na hora, a recepção digita o CPF ou CNPJ. Os cadastros ficam em **Dados para nota fiscal**.
+- **Inscrição estadual:** só empresa tomadora pode ter (número ou ISENTO); para CPF o campo é recusado. A inscrição estadual do **hotel** é outra coisa: a SEFAZ exige para o hotel emitir a NFC-e do café.
+- **CNPJ:** validação dos dígitos (inclusive o CNPJ alfanumérico de julho de 2026) e consulta da situação na Receita. Razão social e endereço vêm da consulta, e empresa baixada ou inapta não pode ser tomadora. `CNPJ_LOOKUP_DRIVER=simulacao` (offline) ou `brasilapi` (dados abertos da Receita, gratuito).
+- **ISS retido:** o hotel escolhe a regra (nunca, ou empresas do mesmo município, exceto Simples e MEI).
+- **Reforma tributária:** CBS 0,9% e IBS 0,1% informativos (ano de teste de 2026), em uma tabela de regras com data de vigência. Na hospedagem e na alimentação, a empresa tomadora **não** aproveita crédito (regimes específicos da LC 214/2025).
+- **Fila de emissão:** numeração sequencial por hotel, nova tentativa automática se o emissor cair, e **consulta antes de reenviar** (se a resposta se perdeu, a nota não sai em dobro). Rode `php bin/send-notifications.php` ou use **Emitir notas da fila** na tela **Notas fiscais**.
+- **Pré-controle:** cada nota autorizada lança ISS, ICMS, CBS e IBS por natureza (a recolher, retido, informativo); o cancelamento (motivo com 15 ou mais caracteres) lança o estorno. Não é a apuração oficial.
+- **Telas:** hóspede (Dados para nota fiscal, nota na reserva e no café), recepção (Notas fiscais, Dados fiscais só para leitura) e administrador (edita os dados fiscais do hotel).
+
+Próximas fases: emissão real (`FISCAL_DRIVER=nacional` pela API da NFS-e Nacional, ou por um intermediador) com certificado digital, emissor alternativo, notas de compra e créditos, perfil Contador e relatórios.
 
 ## Segurança
 

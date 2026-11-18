@@ -16,6 +16,9 @@ use HotelFlex\Domain\Hotel;
 use HotelFlex\Domain\PaymentMethod;
 use HotelFlex\Domain\Role;
 use HotelFlex\Domain\User;
+use HotelFlex\Fiscal\Domain\InvoiceTaker;
+use HotelFlex\Fiscal\Domain\TaxDocument;
+use HotelFlex\Fiscal\Service\InvoiceRequester;
 use HotelFlex\Repository\BreakfastRepository;
 use HotelFlex\Repository\HotelRepository;
 use HotelFlex\Repository\ReservationRepository;
@@ -34,10 +37,12 @@ final class BreakfastService
         private readonly Notifier $notifier,
         private readonly TransactionRunner $transaction,
         private readonly Clock $clock,
+        private readonly InvoiceRequester $invoices,
     ) {
     }
 
-    public function book(User $customer, int $hotelId, DateTimeImmutable $date, int $people, BreakfastPaymentOption $option): int
+    /** @param int $billingProfileId who the invoice goes to, already checked by BillingProfileService */
+    public function book(User $customer, int $hotelId, DateTimeImmutable $date, int $people, BreakfastPaymentOption $option, int $billingProfileId): int
     {
         $hotel = $this->getHotelSellingBreakfast($hotelId);
         $this->assertBookable($hotel, $date, $people);
@@ -45,9 +50,10 @@ final class BreakfastService
             throw new DomainException('Escolha a forma de pagamento.');
         }
 
-        return $this->transaction->run(function () use ($customer, $hotel, $date, $people, $option): int {
+        return $this->transaction->run(function () use ($customer, $hotel, $date, $people, $option, $billingProfileId): int {
+            $this->bookings->lockHotel($hotel->id);
             $this->assertSeatsLeft($this->getAvailability($hotel, $date), $people);
-            $bookingId = $this->bookings->create($this->rows->build($customer, $hotel, $date, $people, $option));
+            $bookingId = $this->bookings->create([...$this->rows->build($customer, $hotel, $date, $people, $option), 'billing_profile_id' => $billingProfileId]);
             $booking = $this->getBooking($bookingId);
             $this->notifier->notifyUser($customer->id, BreakfastMessages::created($booking, $hotel));
             $this->notifier->notifyHotelStaffById($hotel->id, BreakfastMessages::forStaff($booking, $hotel, $customer->name));
@@ -100,9 +106,12 @@ final class BreakfastService
         if (!$booking->isPaid) {
             throw new DomainException('Registre o pagamento antes de marcar como atendido.');
         }
-        if (!$this->bookings->changeStatus($booking->id, BreakfastStatus::Confirmed, BreakfastStatus::Served)) {
-            throw new DomainException('Este café não está confirmado.');
-        }
+        $this->transaction->run(function () use ($booking): void {
+            if (!$this->bookings->changeStatus($booking->id, BreakfastStatus::Confirmed, BreakfastStatus::Served)) {
+                throw new DomainException('Este café não está confirmado.');
+            }
+            $this->invoices->requestForBreakfast($this->getBooking($booking->id));
+        });
     }
 
     public function cancel(User $actor, int $bookingId): void
@@ -129,9 +138,10 @@ final class BreakfastService
         return $expired;
     }
 
-    /** Sale at the counter on the day, at the higher walk-in price, only while seats are left. */
-    public function sellWalkIn(User $actor, int $hotelId, int $people, PaymentMethod $method, string $customerName): void
+    /** Sale at the counter on the day, at the higher walk-in price, only while seats are left. CPF or CNPJ is mandatory for the invoice. */
+    public function sellWalkIn(User $actor, int $hotelId, int $people, PaymentMethod $method, string $customerName, string $customerDocument): void
     {
+        $document = $customerDocument !== '' ? TaxDocument::fromBrazilian($customerDocument) : throw new DomainException('Informe o CPF ou CNPJ do cliente: é obrigatório na nota fiscal.');
         $hotel = $this->getHotelSellingBreakfast($hotelId);
         if (!$actor->canManageHotel($hotel->id) || !$hotel->sellsWalkInBreakfast()) {
             throw new DomainException('Este hotel não vende café da manhã na hora.');
@@ -141,10 +151,13 @@ final class BreakfastService
         if (!in_array($method, PaymentMethod::deskMethods(), true)) {
             throw new DomainException('Escolha como foi pago.');
         }
-        $this->transaction->run(function () use ($actor, $hotel, $today, $people, $method, $customerName): void {
+        $name = mb_substr(trim($customerName), 0, 120);
+        $this->transaction->run(function () use ($actor, $hotel, $today, $people, $method, $name, $document): void {
+            $this->bookings->lockHotel($hotel->id);
             $this->assertSeatsLeft($this->getAvailability($hotel, $today), $people);
             $row = $this->rows->build($actor, $hotel, $today, $people, BreakfastPaymentOption::WalkIn);
-            $this->bookings->create([...$row, 'status' => BreakfastStatus::Served->value, 'is_paid' => 1, 'paid_method' => $method->value, 'walk_in_name' => mb_substr(trim($customerName), 0, 120) ?: null]);
+            $bookingId = $this->bookings->create([...$row, 'status' => BreakfastStatus::Served->value, 'is_paid' => 1, 'paid_method' => $method->value, 'walk_in_name' => $name ?: null, 'walk_in_document' => $document->value]);
+            $this->invoices->requestForBreakfast($this->getBooking($bookingId), InvoiceTaker::withDocumentOnly($name, $document));
         });
     }
 
